@@ -127,6 +127,11 @@ private slots:
     // Frame classification / invalid frames
     void testInvalidFrames();
     void testParseMessageDispatch();
+    void testParamsValidation();
+    void testReservedMethod();
+    void testBatchParse();
+    void testBatchDispatch();
+    void testParseErrorSendsResponse();
 
     // Session: outbound request
     void testSessionSendRequest();
@@ -222,9 +227,16 @@ void TestJsonRpc::testRequestIdFromJson()
 void TestJsonRpc::testRequestIdInvalid()
 {
     QVERIFY_THROWS_EXCEPTION(Error, from_json<RequestId>(QJsonValue(true)));
-    QVERIFY_THROWS_EXCEPTION(Error, from_json<RequestId>(QJsonValue(1.5)));
-    QVERIFY_THROWS_EXCEPTION(
-        Error, from_json<RequestId>(QJsonValue(QJsonValue::Null)));
+
+    // The spec permits null ids (discouraged) and fractional numbers
+    // (discouraged); we preserve both rather than rejecting them.
+    const RequestId null_id
+        = from_json<RequestId>(QJsonValue(QJsonValue::Null));
+    QVERIFY(null_id.isNull());
+
+    const RequestId fractional = from_json<RequestId>(QJsonValue(1.5));
+    QVERIFY(fractional.is_fractional());
+    QCOMPARE(fractional.as_double(), 1.5);
 }
 
 // ---------------------------------------------------------------------------
@@ -307,16 +319,19 @@ void TestJsonRpc::testSerializeNotification()
 
 void TestJsonRpc::testParseNotification()
 {
+    QJsonObject params;
+    params.insert(QStringLiteral("payload"), QStringLiteral("payload"));
     QJsonObject o;
     o.insert(QStringLiteral("jsonrpc"), QStringLiteral("2.0"));
     o.insert(QStringLiteral("method"), QStringLiteral("notify"));
-    o.insert(QStringLiteral("params"), QStringLiteral("payload"));
+    o.insert(QStringLiteral("params"), params);
 
     const JsonRpcMessage msg = parse_message(o);
     QVERIFY(std::holds_alternative<JsonRpcNotification>(msg));
     const auto& note = std::get<JsonRpcNotification>(msg);
     QCOMPARE(note.method, QStringLiteral("notify"));
-    QCOMPARE(note.params.toString(), QStringLiteral("payload"));
+    QCOMPARE(note.params.toObject().value(QStringLiteral("payload")).toString(),
+             QStringLiteral("payload"));
 }
 
 // ---------------------------------------------------------------------------
@@ -491,6 +506,171 @@ void TestJsonRpc::testParseMessageDispatch()
     QVERIFY(std::holds_alternative<JsonRpcResponse>(parse_message(resp)));
 }
 
+void TestJsonRpc::testParamsValidation()
+{
+    QJsonObject req;
+    req.insert(QStringLiteral("jsonrpc"), QStringLiteral("2.0"));
+    req.insert(QStringLiteral("id"), 1);
+    req.insert(QStringLiteral("method"), QStringLiteral("m"));
+    req.insert(QStringLiteral("params"), QStringLiteral("not-an-object"));
+    QVERIFY_THROWS_EXCEPTION(Error, parse_message(req));
+
+    QJsonObject note = req;
+    note.remove(QStringLiteral("id"));
+    QVERIFY_THROWS_EXCEPTION(Error, parse_message(note));
+
+    req.insert(QStringLiteral("params"), QJsonValue(QJsonValue::Null));
+    QVERIFY_THROWS_EXCEPTION(Error, parse_message(req));
+
+    req.insert(QStringLiteral("params"), QJsonArray{ 1, 2 });
+    QVERIFY(std::holds_alternative<JsonRpcRequest>(parse_message(req)));
+}
+
+void TestJsonRpc::testReservedMethod()
+{
+    QJsonObject req;
+    req.insert(QStringLiteral("jsonrpc"), QStringLiteral("2.0"));
+    req.insert(QStringLiteral("id"), 1);
+    req.insert(QStringLiteral("method"), QStringLiteral("rpc.reserved"));
+    QVERIFY_THROWS_EXCEPTION(Error, parse_message(req));
+
+    QJsonObject note;
+    note.insert(QStringLiteral("jsonrpc"), QStringLiteral("2.0"));
+    note.insert(QStringLiteral("method"), QStringLiteral("rpc.reserved"));
+    QVERIFY_THROWS_EXCEPTION(Error, parse_message(note));
+}
+
+void TestJsonRpc::testBatchParse()
+{
+    QJsonObject req;
+    req.insert(QStringLiteral("jsonrpc"), QStringLiteral("2.0"));
+    req.insert(QStringLiteral("id"), 1);
+    req.insert(QStringLiteral("method"), QStringLiteral("m"));
+
+    QJsonObject note;
+    note.insert(QStringLiteral("jsonrpc"), QStringLiteral("2.0"));
+    note.insert(QStringLiteral("method"), QStringLiteral("n"));
+
+    QJsonArray batch;
+    batch.append(req);
+    batch.append(note);
+    batch.append(QStringLiteral("not-an-object"));
+
+    const JsonRpcMessage msg = parse_message(batch);
+    QVERIFY(std::holds_alternative<std::shared_ptr<JsonRpcBatch>>(msg));
+    const auto& parsed = *std::get<std::shared_ptr<JsonRpcBatch>>(msg);
+    QCOMPARE(parsed.items.size(), 3);
+    QVERIFY(parsed.items[0].valid);
+    QVERIFY(std::holds_alternative<JsonRpcRequest>(parsed.items[0].message));
+    QVERIFY(parsed.items[1].valid);
+    QVERIFY(std::holds_alternative<JsonRpcNotification>(
+        parsed.items[1].message));
+    QVERIFY(!parsed.items[2].valid);
+    QVERIFY(std::holds_alternative<JsonRpcResponse>(parsed.items[2].message));
+
+    QVERIFY_THROWS_EXCEPTION(Error, parse_message(QJsonArray{}));
+
+    const QJsonValue round_trip = serialize_message(msg);
+    QVERIFY(round_trip.isArray());
+    QCOMPARE(round_trip.toArray().size(), 3);
+}
+
+void TestJsonRpc::testBatchDispatch()
+{
+    auto mock = std::make_unique<MockTransport>();
+    MockTransport* mock_ptr = mock.get();
+    Session session(std::move(mock));
+
+    session.set_request_handler(
+        QStringLiteral("batch.method"), [](const QJsonValue&) {
+            return QJsonValue(QStringLiteral("batch-result"));
+        });
+    session.start();
+
+    QJsonObject req;
+    req.insert(QStringLiteral("jsonrpc"), QStringLiteral("2.0"));
+    req.insert(QStringLiteral("id"), 21);
+    req.insert(QStringLiteral("method"), QStringLiteral("batch.method"));
+
+    QJsonArray batch;
+    batch.append(req);
+    batch.append(QStringLiteral("invalid-element"));
+    mock_ptr->inject(QJsonDocument(batch).toJson(QJsonDocument::Compact));
+
+    QTRY_VERIFY_WITH_TIMEOUT(mock_ptr->has_sent(), 2000);
+    const QJsonArray reply
+        = QJsonDocument::fromJson(mock_ptr->take_sent()).array();
+    QCOMPARE(reply.size(), 2);
+
+    bool saw_success = false;
+    bool saw_error = false;
+    for(const QJsonValue& value : reply)
+    {
+        const QJsonObject obj = value.toObject();
+        if(obj.value(QStringLiteral("id")).toInt() == 21)
+        {
+            QCOMPARE(obj.value(QStringLiteral("result")).toString(),
+                     QStringLiteral("batch-result"));
+            saw_success = true;
+        }
+        else if(obj.value(QStringLiteral("id")).isNull()
+                && obj.contains(QStringLiteral("error")))
+        {
+            QCOMPARE(obj.value(QStringLiteral("error"))
+                         .toObject()
+                         .value(QStringLiteral("code"))
+                         .toInt(),
+                     -32600);
+            saw_error = true;
+        }
+    }
+    QVERIFY(saw_success);
+    QVERIFY(saw_error);
+
+    // Notification-only batches must produce no response.
+    QJsonObject note;
+    note.insert(QStringLiteral("jsonrpc"), QStringLiteral("2.0"));
+    note.insert(QStringLiteral("method"), QStringLiteral("batch.note"));
+    QJsonArray notes;
+    notes.append(note);
+    mock_ptr->inject(QJsonDocument(notes).toJson(QJsonDocument::Compact));
+    QTest::qWait(50);
+    QVERIFY(!mock_ptr->has_sent());
+
+    session.close();
+}
+
+void TestJsonRpc::testParseErrorSendsResponse()
+{
+    auto mock = std::make_unique<MockTransport>();
+    MockTransport* mock_ptr = mock.get();
+    Session session(std::move(mock));
+    session.start();
+
+    mock_ptr->inject(QByteArrayView("not json"));
+    QTRY_VERIFY_WITH_TIMEOUT(mock_ptr->has_sent(), 2000);
+    const QJsonObject sent
+        = QJsonDocument::fromJson(mock_ptr->take_sent()).object();
+    QVERIFY(sent.value(QStringLiteral("id")).isNull());
+    QCOMPARE(sent.value(QStringLiteral("error"))
+                 .toObject()
+                 .value(QStringLiteral("code"))
+                 .toInt(),
+             -32700);
+
+    mock_ptr->inject(QByteArrayView("[]"));
+    QTRY_VERIFY_WITH_TIMEOUT(mock_ptr->has_sent(), 2000);
+    const QJsonObject empty_batch
+        = QJsonDocument::fromJson(mock_ptr->take_sent()).object();
+    QCOMPARE(empty_batch.value(QStringLiteral("error"))
+                 .toObject()
+                 .value(QStringLiteral("code"))
+                 .toInt(),
+             -32600);
+
+    session.close();
+}
+
 // ---------------------------------------------------------------------------
 // Session: outbound request
 // ---------------------------------------------------------------------------
@@ -502,8 +682,9 @@ void TestJsonRpc::testSessionSendRequest()
     Session session(std::move(mock));
     session.start();
 
-    auto fut = session.send_request(QStringLiteral("test.method"),
-                                    QJsonValue(QStringLiteral("params")));
+    QJsonObject params;
+    params.insert(QStringLiteral("key"), QStringLiteral("value"));
+    auto fut = session.send_request(QStringLiteral("test.method"), params);
     QVERIFY(mock_ptr->has_sent());
 
     const QByteArray frame = mock_ptr->take_sent();
@@ -512,6 +693,11 @@ void TestJsonRpc::testSessionSendRequest()
              QStringLiteral("2.0"));
     QCOMPARE(sent.value(QStringLiteral("method")).toString(),
              QStringLiteral("test.method"));
+    QCOMPARE(sent.value(QStringLiteral("params"))
+                 .toObject()
+                 .value(QStringLiteral("key"))
+                 .toString(),
+             QStringLiteral("value"));
     QVERIFY(sent.contains(QStringLiteral("id")));
 
     QJsonObject resp;
@@ -626,7 +812,9 @@ void TestJsonRpc::testSessionReceiveRequest()
     req.insert(QStringLiteral("jsonrpc"), QStringLiteral("2.0"));
     req.insert(QStringLiteral("id"), 1);
     req.insert(QStringLiteral("method"), QStringLiteral("test.method"));
-    req.insert(QStringLiteral("params"), QStringLiteral("incoming"));
+    QJsonObject params;
+    params.insert(QStringLiteral("value"), QStringLiteral("incoming"));
+    req.insert(QStringLiteral("params"), params);
     mock_ptr->inject(QJsonDocument(req).toJson(QJsonDocument::Compact));
 
     QTRY_VERIFY_WITH_TIMEOUT(mock_ptr->has_sent(), 2000);
@@ -635,7 +823,8 @@ void TestJsonRpc::testSessionReceiveRequest()
     QCOMPARE(sent.value(QStringLiteral("id")).toInt(), 1);
     QCOMPARE(sent.value(QStringLiteral("result")).toString(),
              QStringLiteral("handled"));
-    QCOMPARE(received_params.toString(), QStringLiteral("incoming"));
+    QCOMPARE(received_params.toObject().value(QStringLiteral("value")).toString(),
+             QStringLiteral("incoming"));
 
     session.close();
 }
@@ -685,11 +874,14 @@ void TestJsonRpc::testSessionNotification()
     QJsonObject note;
     note.insert(QStringLiteral("jsonrpc"), QStringLiteral("2.0"));
     note.insert(QStringLiteral("method"), QStringLiteral("note"));
-    note.insert(QStringLiteral("params"), QStringLiteral("notif"));
+    QJsonObject note_params;
+    note_params.insert(QStringLiteral("value"), QStringLiteral("notif"));
+    note.insert(QStringLiteral("params"), note_params);
     mock_ptr->inject(QJsonDocument(note).toJson(QJsonDocument::Compact));
 
     QTRY_VERIFY_WITH_TIMEOUT(call_count.loadAcquire() == 1, 2000);
-    QCOMPARE(received_params.toString(), QStringLiteral("notif"));
+    QCOMPARE(received_params.toObject().value(QStringLiteral("value")).toString(),
+             QStringLiteral("notif"));
     QVERIFY(!mock_ptr->has_sent()); // notifications produce no response
 
     session.close();

@@ -5,9 +5,11 @@
 #include "json.h"
 
 #include <QJsonValue>
+#include <QList>
 #include <QString>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <variant>
 
@@ -118,14 +120,34 @@ inline void from_json(const QJsonValue &v, JsonRpcRequest &out) { out = v; }
 inline void from_json(const QJsonValue &v, JsonRpcNotification &out) { out = v; }
 inline void from_json(const QJsonValue &v, JsonRpcResponse &out) { out = v; }
 
-/// Tagged union over every JSON-RPC frame we accept off the wire. Use
-/// `std::visit` to dispatch on the concrete kind.
-using JsonRpcMessage =
-    std::variant<JsonRpcRequest, JsonRpcNotification, JsonRpcResponse>;
+struct JsonRpcBatch;
 
-/// Parse a single JSON-RPC frame. Returns the variant; throws
-/// `jsonrpc::Error(parse_error)` on parse error or envelope-shape errors that
-/// prevent classification.
+/// Tagged union over every JSON-RPC frame we accept off the wire. Use
+/// `std::visit` to dispatch on the concrete kind. A batch is represented by a
+/// shared pointer so the variant remains finite and copyable.
+using JsonRpcMessage = std::variant<JsonRpcRequest, JsonRpcNotification,
+                                    JsonRpcResponse,
+                                    std::shared_ptr<JsonRpcBatch>>;
+
+/// One element of a JSON-RPC batch. `valid` is false for an element that could
+/// not be decoded; in that case `message` is an error response with a null id
+/// that the Session must send back in the batch response array.
+struct JsonRpcBatchItem {
+  JsonRpcMessage message;
+  bool valid = true;
+};
+
+/// A JSON-RPC batch: a non-empty array of request/notification/response
+/// objects. Empty arrays are rejected by `parse_message`.
+struct JsonRpcBatch {
+  QList<JsonRpcBatchItem> items;
+};
+
+/// Parse a single JSON-RPC frame or a batch array. Returns the variant; throws
+/// `jsonrpc::Error(parse_error)` on malformed JSON or
+/// `jsonrpc::Error(invalid_request)` on envelope-shape errors that prevent
+/// classification. Empty arrays throw `invalid_request` (the Session turns
+/// that into a single error object per the spec).
 [[nodiscard]] JsonRpcMessage parse_message(const QJsonValue &j);
 
 /// Serialize a JSON-RPC frame.

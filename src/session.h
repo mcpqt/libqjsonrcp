@@ -175,9 +175,12 @@ namespace jsonrpc
 
   private:
     void handle_frame(QByteArray raw);
+    void handle_batch(const std::shared_ptr<JsonRpcBatch>& batch);
     void handle_request(JsonRpcRequest req);
+    [[nodiscard]] JsonRpcResponse make_response(JsonRpcRequest req);
     void handle_notification(JsonRpcNotification note);
     void handle_response(JsonRpcResponse resp);
+    void send_error(const ErrorObject& error, RequestId id = {});
     void send_message(const JsonRpcMessage& msg);
     void timeout_loop(void);
     void cancel_all_pending(const ErrorObject& reason);

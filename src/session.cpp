@@ -23,6 +23,23 @@ namespace jsonrpc
 
   using std::chrono::steady_clock;
 
+  namespace
+  {
+    void validate_outbound(const QString& method, const QJsonValue& params)
+    {
+      if(method.startsWith(QStringLiteral("rpc.")))
+      {
+        throw Error{ error_code::invalid_request,
+                     "outbound method name uses reserved 'rpc.' prefix" };
+      }
+      if(!params.isNull() && !params.isObject() && !params.isArray())
+      {
+        throw Error{ error_code::invalid_params,
+                     "outbound params must be a JSON object or array" };
+      }
+    }
+  } // namespace
+
   // =====================================================================
   // Construction / destruction
   // =====================================================================
@@ -219,6 +236,17 @@ namespace jsonrpc
                                  Pending pending,
                                  std::chrono::milliseconds timeout)
   {
+    try
+    {
+      validate_outbound(method, params);
+    }
+    catch(const Error& e)
+    {
+      if(pending.reject)
+        pending.reject(std::make_exception_ptr(e));
+      return;
+    }
+
     auto id = next_id();
 
     JsonRpcRequest req;
@@ -313,6 +341,15 @@ namespace jsonrpc
 
   std::error_code Session::send_notification(QString method, QJsonValue params)
   {
+    try
+    {
+      validate_outbound(method, params);
+    }
+    catch(const Error&)
+    {
+      return std::make_error_code(std::errc::invalid_argument);
+    }
+
     JsonRpcNotification note;
     note.method = std::move(method);
     if(!params.isNull())
@@ -359,8 +396,8 @@ namespace jsonrpc
     catch(const Error& e)
     {
       JSONRPC_LOG_WARN(QString{ "rejecting non-JSON frame: " } + e.what());
-      return; // JSON-RPC says we send a parse error response, but per the
-              // spec we cannot when there is no id; simplest is to drop.
+      send_error(ErrorObject{ error_code::parse_error, e.message(), e.data() });
+      return;
     }
 
     JsonRpcMessage msg;
@@ -372,15 +409,17 @@ namespace jsonrpc
     {
       JSONRPC_LOG_WARN(QString{ "rejecting malformed JSON-RPC frame: " }
                    + e.what());
+      send_error(ErrorObject{ static_cast<error_code>(e.code()), e.message(), e.data() });
       return;
     }
     catch(const std::exception& e)
     {
       // A from_json deeper in parse_message can throw when fields are
-      // mistyped or missing. Treat those identically to a parse error
-      // and drop the frame.
+      // mistyped or missing. Treat those identically to a parse error.
       JSONRPC_LOG_WARN(QString{ "rejecting malformed JSON-RPC frame: " }
                    + e.what());
+      send_error(ErrorObject{ error_code::invalid_request,
+                              QString::fromUtf8(e.what()), {} });
       return;
     }
 
@@ -417,15 +456,153 @@ namespace jsonrpc
           {
             handle_notification(std::move(m));
           }
-          else
+          else if constexpr(std::is_same_v<T, JsonRpcResponse>)
           {
             handle_response(std::move(m));
+          }
+          else
+          {
+            handle_batch(m);
           }
         },
         msg);
   }
 
+  void Session::handle_batch(const std::shared_ptr<JsonRpcBatch>& batch)
+  {
+    if(!batch)
+      return;
+
+    const auto responses = std::make_shared<QList<JsonRpcMessage>>();
+    const auto state_mu = std::make_shared<std::mutex>();
+    const auto pending = std::make_shared<int>(0);
+
+    auto flush = [this, responses, state_mu, pending]() {
+      QList<JsonRpcMessage> out;
+      {
+        std::lock_guard<std::mutex> lk(*state_mu);
+        if(*pending != 0 || responses->isEmpty())
+          return;
+        out.swap(*responses);
+      }
+      auto reply = std::make_shared<JsonRpcBatch>();
+      for(auto& message : out)
+        reply->items.append(JsonRpcBatchItem{ std::move(message), true });
+      try
+      {
+        send_message(reply);
+      }
+      catch(const std::exception& e)
+      {
+        JSONRPC_LOG_ERROR(QString{ "failed to send batch response: " }
+                          + e.what());
+      }
+    };
+
+    auto add = [responses, state_mu, pending, flush](JsonRpcMessage message) {
+      {
+        std::lock_guard<std::mutex> lk(*state_mu);
+        responses->append(std::move(message));
+        if(*pending > 0)
+          --*pending;
+        if(*pending != 0)
+          return;
+      }
+      flush();
+    };
+
+    // Count request elements first so a fast worker cannot flush the batch
+    // before the loop has finished enqueuing every element.
+    int request_count = 0;
+    for(const auto& item : batch->items)
+    {
+      if(item.valid
+         && std::holds_alternative<JsonRpcRequest>(item.message))
+        ++request_count;
+    }
+
+    {
+      std::lock_guard<std::mutex> lk(*state_mu);
+      *pending = request_count;
+    }
+
+    for(auto& item : batch->items)
+    {
+      if(!item.valid)
+      {
+        // Invalid elements already carry an error response. Append them
+        // without touching the request count; the final flush below (or the
+        // last request worker) sends the complete array exactly once.
+        std::lock_guard<std::mutex> lk(*state_mu);
+        responses->append(std::move(item.message));
+        continue;
+      }
+
+      std::visit(
+          [&](auto&& m) {
+            using T = std::decay_t<decltype(m)>;
+            if constexpr(std::is_same_v<T, JsonRpcRequest>)
+            {
+              {
+                std::lock_guard<std::mutex> lk(m_workers_mu);
+                ++m_workers_running;
+              }
+              std::thread([this, req = std::move(m), add]() mutable {
+                add(make_response(std::move(req)));
+                std::lock_guard<std::mutex> lk(m_workers_mu);
+                --m_workers_running;
+                m_workers_cv.notify_all();
+              }).detach();
+            }
+            else if constexpr(std::is_same_v<T, JsonRpcNotification>)
+            {
+              handle_notification(std::move(m));
+            }
+            else if constexpr(std::is_same_v<T, JsonRpcResponse>)
+            {
+              handle_response(std::move(m));
+            }
+            else
+            {
+              handle_batch(m);
+            }
+          },
+          item.message);
+    }
+
+    flush();
+  }
+
+  void Session::send_error(const ErrorObject& error, RequestId id)
+  {
+    JsonRpcResponse resp;
+    resp.id = std::move(id);
+    resp.outcome = error;
+    try
+    {
+      send_message(resp);
+    }
+    catch(const std::exception& e)
+    {
+      JSONRPC_LOG_ERROR(QString{ "failed to send error response: " }
+                        + e.what());
+    }
+  }
+
   void Session::handle_request(JsonRpcRequest req)
+  {
+    auto resp = make_response(std::move(req));
+    try
+    {
+      send_message(resp);
+    }
+    catch(const std::exception& e)
+    {
+      JSONRPC_LOG_ERROR(QString{ "failed to send response: " } + e.what());
+    }
+  }
+
+  JsonRpcResponse Session::make_response(JsonRpcRequest req)
   {
     RequestHandler handler;
     {
@@ -447,59 +624,51 @@ namespace jsonrpc
         "method not found: " + req.method,
         {},
       };
-    }
-    else
-    {
-      try
-      {
-        static const QJsonValue kNull{ QJsonValue::Null };
-        const QJsonValue& params_in = req.params.isNull() ? kNull : req.params;
-        resp.outcome = handler(params_in);
-      }
-      catch(const Error& e)
-      {
-        if(e.code() == error_code::parse_error)
-        {
-          // A codec error escaping a handler almost always means the
-          // inbound params were the wrong shape; map to invalid_params
-          // rather than parse_error so clients can fix their request.
-          resp.outcome = ErrorObject{
-            error_code::invalid_params,
-            QString{ "invalid params: " } + e.what(),
-            {},
-          };
-        }
-        else
-        {
-          resp.outcome = e.object();
-        }
-      }
-      catch(const std::exception& e)
-      {
-        resp.outcome = ErrorObject{
-          error_code::internal_error,
-          QString{ "handler threw: " } + e.what(),
-          {},
-        };
-      }
-      catch(...)
-      {
-        resp.outcome = ErrorObject{
-          error_code::internal_error,
-          "handler threw a non-std exception",
-          {},
-        };
-      }
+      return resp;
     }
 
     try
     {
-      send_message(resp);
+      static const QJsonValue kNull{ QJsonValue::Null };
+      const QJsonValue& params_in = req.params.isNull() ? kNull : req.params;
+      resp.outcome = handler(params_in);
+    }
+    catch(const Error& e)
+    {
+      if(e.code() == error_code::parse_error)
+      {
+        // A codec error escaping a handler almost always means the
+        // inbound params were the wrong shape; map to invalid_params
+        // rather than parse_error so clients can fix their request.
+        resp.outcome = ErrorObject{
+          error_code::invalid_params,
+          QString{ "invalid params: " } + e.what(),
+          {},
+        };
+      }
+      else
+      {
+        resp.outcome = e.object();
+      }
     }
     catch(const std::exception& e)
     {
-      JSONRPC_LOG_ERROR(QString{ "failed to send response: " } + e.what());
+      resp.outcome = ErrorObject{
+        error_code::internal_error,
+        QString{ "handler threw: " } + e.what(),
+        {},
+      };
     }
+    catch(...)
+    {
+      resp.outcome = ErrorObject{
+        error_code::internal_error,
+        "handler threw a non-std exception",
+        {},
+      };
+    }
+
+    return resp;
   }
 
   void Session::handle_notification(JsonRpcNotification note)

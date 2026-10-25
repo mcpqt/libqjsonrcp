@@ -14,10 +14,38 @@ namespace jsonrpc
 
   ErrorObject& ErrorObject::operator=(const QJsonValue& value)
   {
+    if(!value.isObject())
+    {
+      throw Error(error_code::invalid_request,
+                  "JSON-RPC error must be an object");
+    }
+
     const QJsonObject obj = value.toObject();
-    code = static_cast<error_code>(obj.value("code").toInt());
+    if(!obj.contains("code") || !obj.value("code").isDouble())
+    {
+      throw Error(error_code::invalid_request,
+                  "JSON-RPC error.code must be an integer");
+    }
+    if(!obj.contains("message") || !obj.value("message").isString())
+    {
+      throw Error(error_code::invalid_request,
+                  "JSON-RPC error.message must be a string");
+    }
+
+    const double rawCode = obj.value("code").toDouble();
+    const qint64 whole = static_cast<qint64>(rawCode);
+    if(static_cast<double>(whole) != rawCode)
+    {
+      throw Error(error_code::invalid_request,
+                  "JSON-RPC error.code must be an integer");
+    }
+
+    // Unknown/application-defined codes are valid JSON-RPC. Preserve them
+    // as-is instead of collapsing invalid values to 0.
+    code = static_cast<error_code>(static_cast<int32_t>(whole));
     message = obj.value("message").toString();
-    data = obj.value("data");
+    data = obj.contains("data") ? obj.value("data")
+                                : QJsonValue(QJsonValue::Null);
     return *this;
   }
 }
