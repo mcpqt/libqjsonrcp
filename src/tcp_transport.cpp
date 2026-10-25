@@ -7,13 +7,10 @@
 #include <system_error>
 
 namespace jsonrpc {
-namespace rpc {
-
-namespace {
 
 /// Extract Content-Length from the header bytes. Returns -1 when absent or
 /// malformed. Header lines are CRLF-terminated per the LSP wire format.
-qint64 parse_content_length(const QByteArray &header) {
+static qint64 parse_content_length(const QByteArray &header) {
   for (const QByteArray &rawLine : header.split('\n')) {
     const QByteArray line = rawLine.trimmed();
     const int colon = line.indexOf(':');
@@ -27,8 +24,6 @@ qint64 parse_content_length(const QByteArray &header) {
   }
   return -1;
 }
-
-} // namespace
 
 QtTcpTransport::QtTcpTransport(QTcpSocket *socket) : m_socket(socket) {
   if (m_socket) {
@@ -139,5 +134,4 @@ void QtTcpTransport::handleError(QAbstractSocket::SocketError error) {
     m_on_error(std::make_error_code(std::errc::io_error));
 }
 
-} // namespace rpc
 } // namespace jsonrpc

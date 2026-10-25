@@ -10,7 +10,6 @@
 #include <memory>
 
 namespace jsonrpc {
-namespace rpc {
 
 /// Qt-based TCP transport implementing the rpc::Transport interface.
 /// Reads Content-Length framed JSON-RPC messages from a QTcpSocket and
@@ -48,7 +47,6 @@ private:
   CloseCallback m_on_close;
 };
 
-} // namespace rpc
 } // namespace jsonrpc
 
 #endif // LSP_QT_TCP_TRANSPORT_H
