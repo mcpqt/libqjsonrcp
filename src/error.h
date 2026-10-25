@@ -6,8 +6,8 @@
 
 #include <exception>
 #include <stdexcept>
-#include <string>
 #include <utility>
+#include <cstdint>
 
 namespace jsonrpc
 {
@@ -23,7 +23,7 @@ namespace jsonrpc
   /// `no_error` (0) represents the absence of an error. This is an unscoped
   /// enumeration: it converts implicitly to the wire integer, so it can be
   /// passed to Error and compared with ErrorObject::code without casts.
-  enum error_code : int
+  enum error_code : int32_t
   {
     no_error = 0,
 
@@ -33,9 +33,6 @@ namespace jsonrpc
     method_not_found = -32601,
     invalid_params = -32602,
     internal_error = -32603,
-
-    // MCP-specific (in the implementation-defined JSON-RPC range).
-    url_elicitation_required = -32042,
   };
 
   /// A wire-format-compatible JSON-RPC error object.
@@ -77,41 +74,12 @@ namespace jsonrpc
     {
     }
 
-    [[nodiscard]] const ErrorObject& object(void) const noexcept
-    {
-      return m_error;
-    }
+    [[nodiscard]] const ErrorObject& object(void) const noexcept { return m_error; }
     [[nodiscard]] int code(void) const noexcept { return m_error.code; }
-    [[nodiscard]] const QString& message(void) const noexcept
-    {
-      return m_error.message;
-    }
-    [[nodiscard]] const QJsonValue& data(void) const noexcept
-    {
-      return m_error.data;
-    }
+    [[nodiscard]] const QString& message(void) const noexcept { return m_error.message; }
+    [[nodiscard]] const QJsonValue& data(void) const noexcept { return m_error.data; }
 
   private:
     ErrorObject m_error;
   };
-
-  inline ErrorObject::operator QJsonValue() const
-  {
-    QJsonObject obj;
-    obj.insert("code", static_cast<int>(code));
-    obj.insert("message", message);
-    if (!data.isNull())
-      obj.insert("data", data);
-    return obj;
-  }
-
-  inline ErrorObject& ErrorObject::operator=(const QJsonValue& value)
-  {
-    const QJsonObject obj = value.toObject();
-    code = static_cast<error_code>(obj.value("code").toInt());
-    message = obj.value("message").toString();
-    data = obj.value("data");
-    return *this;
-  }
-
 } // namespace jsonrpc

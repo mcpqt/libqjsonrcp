@@ -15,30 +15,42 @@ namespace jsonrpc {
 
 inline const QString kJsonrpcVersion = "2.0";
 
-/// A JSON-RPC request id. The spec permits string or number; we preserve the
-/// original kind on round-trip so a client that emits integer ids gets back
-/// integer ids, and likewise for strings.
+/// A JSON-RPC request id. The spec permits String, Number, or Null; we
+/// preserve the original kind on round-trip so a client that emits integer
+/// ids gets back integer ids, and likewise for strings and fractional
+/// numbers. Null ids are permitted (though discouraged by the spec).
 ///
 /// The value is the QJsonValue itself (the struct inherits QJsonValue), so
 /// no custom metatype registration or extra QVariant boxing is needed.
-/// Conversion operators expose the string and integer views; assignment
-/// accepts a wire value and validates the kind.
+/// Conversion operators expose the string, integer, and number views;
+/// assignment accepts a wire value and validates the kind.
 struct RequestId : QJsonValue {
   RequestId(void) : QJsonValue(QJsonValue::Null) {}
   RequestId(QString s) : QJsonValue(std::move(s)) {}
   RequestId(const char *s) : QJsonValue(QString::fromUtf8(s)) {}
   RequestId(std::int64_t i) : QJsonValue(static_cast<qint64>(i)) {}
   RequestId(int i) : QJsonValue(static_cast<qint64>(i)) {}
+  RequestId(double d) : QJsonValue(d) {}
 
   [[nodiscard]] bool is_string(void) const noexcept { return isString(); }
-  [[nodiscard]] bool is_integer(void) const noexcept { return isDouble(); }
+  [[nodiscard]] bool is_number(void) const noexcept { return isDouble(); }
+  [[nodiscard]] bool is_integer(void) const noexcept
+  {
+    return isDouble() && static_cast<double>(toInteger()) == toDouble();
+  }
+  [[nodiscard]] bool is_fractional(void) const noexcept
+  {
+    return isDouble() && static_cast<double>(toInteger()) != toDouble();
+  }
 
   [[nodiscard]] QString as_string(void) const { return toString(); }
   [[nodiscard]] std::int64_t as_integer(void) const { return toInteger(); }
+  [[nodiscard]] double as_double(void) const { return toDouble(); }
 
   /// Canonical string form used for hash/map keys. String ids are returned
-  /// as-is with a leading 's:' marker; integer ids get an 'i:' marker. This
-  /// guarantees that the integer 5 and the string "5" do not collide.
+  /// as-is with a leading 's:' marker; whole-number ids get an 'i:' marker;
+  /// fractional ids get a 'd:' marker; null ids get 'n:'. This guarantees
+  /// that the integer 5 and the string "5" do not collide.
   [[nodiscard]] QString canonical(void) const;
 
   friend bool operator==(const RequestId &, const RequestId &) = default;
@@ -96,6 +108,15 @@ struct JsonRpcResponse {
   [[nodiscard]] operator QJsonValue() const;
   JsonRpcResponse &operator=(const QJsonValue &);
 };
+
+/// Explicit decoders for wire structs that only provide
+/// `operator=(const QJsonValue&)`. Without these, the generic `from_json`
+/// template detects itself via ADL and recurses until the stack overflows.
+inline void from_json(const QJsonValue &v, RequestId &out) { out = v; }
+inline void from_json(const QJsonValue &v, ErrorObject &out) { out = v; }
+inline void from_json(const QJsonValue &v, JsonRpcRequest &out) { out = v; }
+inline void from_json(const QJsonValue &v, JsonRpcNotification &out) { out = v; }
+inline void from_json(const QJsonValue &v, JsonRpcResponse &out) { out = v; }
 
 /// Tagged union over every JSON-RPC frame we accept off the wire. Use
 /// `std::visit` to dispatch on the concrete kind.

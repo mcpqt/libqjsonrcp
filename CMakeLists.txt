@@ -11,6 +11,7 @@ find_package(Qt6 REQUIRED COMPONENTS Core Network)
 
 add_library(qjsonrpc
     src/error.h
+    src/error.cpp
     src/json.h
     src/jsonrpc.h
     src/jsonrpc.cpp
@@ -27,3 +28,8 @@ add_library(qjsonrpc
 
 target_include_directories(qjsonrpc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(qjsonrpc PUBLIC Qt6::Core Qt6::Network)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_subdirectory(tests)
+endif()

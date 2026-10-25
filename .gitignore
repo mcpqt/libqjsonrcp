@@ -27,3 +27,7 @@ compile_commands.json
 moc_*.cpp
 ui_*.h
 qrc_*.cpp
+
+# Misc.
+docs/
+

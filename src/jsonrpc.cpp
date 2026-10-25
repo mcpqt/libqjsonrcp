@@ -10,15 +10,49 @@
 
 namespace jsonrpc {
 
+namespace {
+
+void validate_method(const QString &method) {
+  if (method.startsWith(QStringLiteral("rpc."))) {
+    throw Error(error_code::invalid_request,
+                "JSON-RPC method names beginning with 'rpc.' are reserved");
+  }
+}
+
+void validate_params(const QJsonValue &params) {
+  if (params.isNull())
+    return;
+  if (!params.isObject() && !params.isArray()) {
+    throw Error(error_code::invalid_request,
+                "JSON-RPC params must be a JSON object or array");
+  }
+}
+
+} // namespace
+
 // =====================================================================
 // RequestId
 // =====================================================================
 
 QString RequestId::canonical(void) const {
-  if (is_string()) {
-    return "s:" + as_string();
+  if (isNull()) {
+    return QStringLiteral("n:");
   }
-  return "i:" + QString::number(as_integer());
+  if (is_string()) {
+    return QStringLiteral("s:") + as_string();
+  }
+  if (isDouble()) {
+    const double d = as_double();
+    const qint64 i = toInteger();
+    if (static_cast<double>(i) == d) {
+      return QStringLiteral("i:") + QString::number(i);
+    }
+    // Fractional ids are discouraged by the spec but still legal. Use a
+    // stable representation so distinct values never collapse to the same
+    // hash/map key.
+    return QStringLiteral("d:") + QString::number(d, 'g', 17);
+  }
+  return QStringLiteral("u:") + QString::number(toInteger());
 }
 
 RequestId &RequestId::operator=(const QJsonValue &j) {
@@ -27,15 +61,19 @@ RequestId &RequestId::operator=(const QJsonValue &j) {
     return *this;
   }
   if (j.isDouble()) {
-    // The spec types `id` as `string | number`; some JS clients
-    // emit small whole numbers as floats (`1.0`) because JS has
-    // no integer literal. Accept whole values; reject fractional.
-    std::int64_t v{};
-    from_json(j, v);
-    *this = RequestId{v};
+    // The spec types `id` as `string | number | null`. Some JS clients
+    // emit whole numbers as floats (`1.0`) because JS has no integer
+    // literal; fractional values are discouraged but permitted. Preserve
+    // the number exactly as it arrived.
+    *this = RequestId{j.toDouble()};
     return *this;
   }
-  throw Error(error_code::parse_error, "JSON-RPC id must be a string or integer");
+  if (j.isNull()) {
+    *this = RequestId{};
+    return *this;
+  }
+  throw Error(error_code::parse_error,
+              "JSON-RPC id must be a string, number, or null");
 }
 
 // =====================================================================
@@ -111,6 +149,7 @@ JsonRpcResponse &JsonRpcResponse::operator=(const QJsonValue &j) {
   } else {
     id = RequestId();
   }
+
   const bool has_result = o.contains("result");
   const bool has_error = o.contains("error");
   if (has_result == has_error) {
@@ -118,11 +157,11 @@ JsonRpcResponse &JsonRpcResponse::operator=(const QJsonValue &j) {
                 "JSON-RPC response must carry exactly one of "
                 "\"result\" or \"error\"");
   }
-  if (has_result) {
+
+  if (has_result)
     outcome = o.value("result");
-  } else {
+  else
     outcome = from_json<ErrorObject>(o.value("error"));
-  }
 
   return *this;
 }

@@ -296,7 +296,7 @@ namespace jsonrpc
 
   template <class T> void from_json(const QJsonValue& v, std::optional<T>& out)
   {
-    if(v.isNull() || v.isNull())
+    if(v.isNull())
     {
       out.reset();
       return;
@@ -527,7 +527,7 @@ namespace jsonrpc
       return QString::fromUtf8(
           QJsonDocument(v.toArray()).toJson(QJsonDocument::Compact));
     }
-    if(v.isNull() || v.isNull())
+    if(v.isNull())
       return "null";
     if(v.isBool())
       return v.toBool() ? "true" : "false";
