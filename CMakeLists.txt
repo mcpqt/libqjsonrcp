@@ -17,8 +17,8 @@ add_library(qjsonrpc
     src/jsonrpc.cpp
     src/log.h
     src/log.cpp
-    src/qt_tcp_transport.h
-    src/qt_tcp_transport.cpp
+    src/tcp_transport.h
+    src/tcp_transport.cpp
     src/session.h
     src/session.cpp
     src/stdio_transport.h
