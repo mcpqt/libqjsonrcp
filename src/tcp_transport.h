@@ -15,11 +15,11 @@ namespace jsonrpc {
 /// Reads Content-Length framed JSON-RPC messages from a QTcpSocket and
 /// writes similarly framed messages back. The transport takes ownership of
 /// the socket and deletes it on close/destruction.
-class QtTcpTransport : public QObject, public Transport {
+class TcpTransport : public QObject, public Transport {
   Q_OBJECT
 public:
-  explicit QtTcpTransport(QTcpSocket *socket);
-  ~QtTcpTransport() override;
+  explicit TcpTransport(QTcpSocket *socket);
+  ~TcpTransport() override;
 
   void on_message(MessageCallback cb) override;
   void on_error(ErrorCallback cb) override;

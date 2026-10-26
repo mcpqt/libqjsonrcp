@@ -25,34 +25,34 @@ static qint64 parse_content_length(const QByteArray &header) {
   return -1;
 }
 
-QtTcpTransport::QtTcpTransport(QTcpSocket *socket) : m_socket(socket) {
+TcpTransport::TcpTransport(QTcpSocket *socket) : m_socket(socket) {
   if (m_socket) {
     connect(m_socket, &QTcpSocket::readyRead, this,
-            &QtTcpTransport::handleReadyRead);
+            &TcpTransport::handleReadyRead);
     connect(m_socket, &QTcpSocket::disconnected, this,
-            &QtTcpTransport::handleDisconnected);
+            &TcpTransport::handleDisconnected);
     connect(m_socket, &QTcpSocket::errorOccurred, this,
-            &QtTcpTransport::handleError);
+            &TcpTransport::handleError);
   }
 }
 
-QtTcpTransport::~QtTcpTransport() { close(); }
+TcpTransport::~TcpTransport() { close(); }
 
-void QtTcpTransport::on_message(MessageCallback cb) {
+void TcpTransport::on_message(MessageCallback cb) {
   m_on_message = std::move(cb);
 }
 
-void QtTcpTransport::on_error(ErrorCallback cb) { m_on_error = std::move(cb); }
+void TcpTransport::on_error(ErrorCallback cb) { m_on_error = std::move(cb); }
 
-void QtTcpTransport::on_close(CloseCallback cb) { m_on_close = std::move(cb); }
+void TcpTransport::on_close(CloseCallback cb) { m_on_close = std::move(cb); }
 
-void QtTcpTransport::start(void) {
+void TcpTransport::start(void) {
   if (m_running)
     return;
   m_running = true;
 }
 
-void QtTcpTransport::close(void) {
+void TcpTransport::close(void) {
   if (m_closed)
     return;
   m_closed = true;
@@ -64,7 +64,7 @@ void QtTcpTransport::close(void) {
   }
 }
 
-std::error_code QtTcpTransport::send(QByteArrayView frame) {
+std::error_code TcpTransport::send(QByteArrayView frame) {
   if (!m_running || m_closed || !m_socket)
     return std::make_error_code(std::errc::not_connected);
 
@@ -79,11 +79,11 @@ std::error_code QtTcpTransport::send(QByteArrayView frame) {
   return {};
 }
 
-bool QtTcpTransport::is_open(void) const noexcept {
+bool TcpTransport::is_open(void) const noexcept {
   return m_running && !m_closed;
 }
 
-void QtTcpTransport::handleReadyRead() {
+void TcpTransport::handleReadyRead() {
   if (!m_running || !m_socket)
     return;
   m_buffer.append(m_socket->readAll());
@@ -118,7 +118,7 @@ void QtTcpTransport::handleReadyRead() {
   }
 }
 
-void QtTcpTransport::handleDisconnected() {
+void TcpTransport::handleDisconnected() {
   if (m_closed)
     return;
   m_closed = true;
@@ -127,7 +127,7 @@ void QtTcpTransport::handleDisconnected() {
     m_on_close();
 }
 
-void QtTcpTransport::handleError(QAbstractSocket::SocketError error) {
+void TcpTransport::handleError(QAbstractSocket::SocketError error) {
   if (error == QAbstractSocket::RemoteHostClosedError)
     return;
   if (m_on_error)
